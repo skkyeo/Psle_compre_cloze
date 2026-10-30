@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cloze Word Coach</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Cloze Word Coach <span class="sub">PSLE Comprehension Cloze</span></div>
+    <nav class="tabs" id="tabs">
+      <a href="#dashboard" data-tab="dashboard">My Level</a>
+      <a href="#words" data-tab="words">Word List</a>
+      <a href="#quiz" data-tab="quiz">Pop Quiz</a>
+      <a href="#test" data-tab="test">Level Test</a>
+      <a href="#settings" data-tab="settings">Settings</a>
+    </nav>
+  </header>
+
+  <main id="view" class="container"></main>
+
+  <footer class="foot">
+    Progress is saved in this browser only. Use Settings &rarr; Export to back it up.
+  </footer>
+
+  <script src="data/words.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
