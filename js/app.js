@@ -22,7 +22,7 @@
 
   // ---------- state ----------
   function blankState() {
-    return { progress: {}, sources: {}, custom: [], tests: [], quizzes: [] };
+    return { progress: {}, sources: {}, custom: [], tests: [], quizzes: [], sentences: [] };
   }
   function load() {
     try {
@@ -143,7 +143,7 @@
   }
 
   // ---------- router ----------
-  const views = { dashboard: renderDashboard, words: renderWords, quiz: renderQuizSetup, test: renderTestIntro, settings: renderSettings };
+  const views = { dashboard: renderDashboard, words: renderWords, quiz: renderQuizSetup, write: renderWriteSetup, test: renderTestIntro, settings: renderSettings };
   function route() {
     const tab = (location.hash || "#dashboard").slice(1);
     const fn = views[tab] || renderDashboard;
@@ -152,6 +152,8 @@
     window.scrollTo(0, 0);
   }
   window.addEventListener("hashchange", route);
+  // tapping the tab you are already on (e.g. mid-quiz) goes back to that tab's start screen
+  $$("#tabs a").forEach((a) => a.addEventListener("click", () => { if (a.getAttribute("href") === location.hash) route(); }));
 
   // ---------- dashboard ----------
   function renderDashboard(el) {
@@ -216,6 +218,8 @@
             <div class="pct">${r.acc === null ? "&ndash;" : r.acc + "%"}</div>
           </div>`).join("")}
       </div>
+
+      ${sentenceCard()}
 
       <div class="card">
         <h2>Level Test history</h2>
@@ -673,6 +677,187 @@
       <div class="row"><a class="btn primary" href="#quiz">Practise with a Pop Quiz</a><a class="btn" href="#dashboard">See my dashboard</a></div>`;
   }
 
+  // ---------- use it (write a sentence, marked by Claude) ----------
+  const STARS = (n) => "★".repeat(n) + "☆".repeat(4 - n);
+  const SCORE_WORDS = ["Not yet", "Needs work", "Nearly", "Good", "Excellent"];
+  const writePrefs = { n: 5, showMeaning: true, cat: "" };
+
+  function sentenceCard() {
+    const recent = state.sentences.slice(-20);
+    if (!recent.length) return "";
+    const avg = recent.reduce((s, r) => s + r.score, 0) / recent.length;
+    return `<div class="card stat">
+      <h2>Sentence writing</h2>
+      <div class="num">${avg.toFixed(1)}<span style="font-size:1rem;color:var(--muted)">/4</span></div>
+      <div class="label">Average of the last ${recent.length} sentences (${state.sentences.length} written in total).
+        <a href="#write">See them</a></div>
+    </div>`;
+  }
+
+  function startLevel() {
+    const t = state.tests[state.tests.length - 1];
+    return t ? Math.max(1, Math.min(3, 0.5 + (t.score / 100) * 3)) : 1.5;
+  }
+
+  function renderWriteSetup(el) {
+    const hasKey = !!window.ClozeTutor.getKey();
+    const catOpts = Object.entries(window.CATEGORIES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+    const log = state.sentences.slice(-30).reverse();
+    el.innerHTML = `
+      <h1>Use It</h1>
+      <p class="lead">See a word, write your own sentence with it, and get it marked out of 4. A strong sentence brings a harder word next;
+        a weak one brings an easier word, and the missed word comes back later in the round.</p>
+      ${hasKey ? "" : `<div class="notice" style="margin-bottom:14px">Marking needs an Anthropic API key. Add one in <a href="#settings">Settings</a> first.</div>`}
+      <div class="card">
+        <div class="row" style="gap:16px;align-items:flex-end">
+          <label class="field">Words
+            <select id="wn"><option>5</option><option>8</option><option>10</option><option>15</option></select></label>
+          <label class="field">Category
+            <select id="wcat"><option value="">All categories</option>${catOpts}</select></label>
+          <label class="field">Show the meaning
+            <select id="wmean"><option value="1">Yes (easier)</option><option value="0">No (harder)</option></select></label>
+          <button class="btn primary" id="wstart" ${hasKey ? "" : "disabled"}>Start</button>
+        </div>
+        <p class="hint">Starts at ${startLevel() >= 2.5 ? "level 3" : startLevel() >= 1.5 ? "level 2" : "level 1"} words, based on the latest Level Test.</p>
+      </div>
+      ${log.length ? `<div class="card"><h2>Recent sentences</h2><table class="hist">
+        <tr><th>Date</th><th>Word</th><th>Sentence</th><th>Score</th></tr>
+        ${log.map((r) => `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.word)}</td>
+          <td>${esc(r.sentence)}${r.corrected && r.corrected !== r.sentence ? `<div class="hint">Better: ${esc(r.corrected)}</div>` : ""}</td>
+          <td title="${esc(r.feedback)}">${r.score}/4</td></tr>`).join("")}
+      </table></div>` : ""}`;
+    $("#wn").value = String(writePrefs.n);
+    $("#wcat").value = writePrefs.cat;
+    $("#wmean").value = writePrefs.showMeaning ? "1" : "0";
+    $("#wstart").addEventListener("click", () => {
+      writePrefs.n = Number($("#wn").value);
+      writePrefs.cat = $("#wcat").value;
+      writePrefs.showMeaning = $("#wmean").value === "1";
+      runWrite(el);
+    });
+  }
+
+  function runWrite(el) {
+    const pool = WORDS.filter((w) => !writePrefs.cat || w.cat === writePrefs.cat);
+    if (!pool.length) return;
+    let level = startLevel();
+    const used = new Set();
+    const retry = [];            // [{w, dueAt}] words to try again later in the round
+    const results = [];
+    const total = writePrefs.n;
+
+    const pickNext = (i) => {
+      const r = retry.findIndex((x) => x.dueAt <= i);
+      if (r >= 0) return retry.splice(r, 1)[0].w;
+      const target = Math.max(1, Math.min(3, Math.round(level)));
+      let list = pool.filter((w) => !used.has(w.id) && w.level === target);
+      if (!list.length) list = pool.filter((w) => !used.has(w.id));
+      if (!list.length) list = pool;
+      // weaker and untried words first
+      const weakFirst = list.filter((w) => status(w.id) !== "mastered");
+      list = weakFirst.length ? weakFirst : list;
+      return list[Math.floor(Math.random() * list.length)];
+    };
+
+    const step = (i, w) => {
+      if (i === total) return writeSummary(el, results);
+      used.add(w.id);
+      const isRetry = results.some((r) => r.w.id === w.id);
+      el.innerHTML = `
+        <h1>Use It</h1>${progressBar(i, total)}
+        <div class="card">
+          <div class="hint">${isRetry ? "Let's try this one again." : "Write ONE sentence of your own using:"}</div>
+          <div class="row" style="margin:6px 0 4px">
+            <span class="q-sentence" style="margin:0"><b>${esc(w.word)}</b></span>
+            <span class="chip">${esc(window.CATEGORIES[w.cat])}</span>
+            <span class="dots" title="Level ${w.level}">${"●".repeat(w.level)}${"○".repeat(3 - w.level)}</span>
+            <button class="btn small" id="say" title="Say the word">🔊</button>
+          </div>
+          ${writePrefs.showMeaning ? `<div class="meaning hint">Meaning: ${esc(w.meaning)}</div>` : ""}
+          <textarea id="sent" rows="3" placeholder="Type your sentence here" style="margin-top:10px" spellcheck="false"></textarea>
+          <div class="row" style="margin-top:10px">
+            <button class="btn primary" id="mark">Mark my sentence</button>
+            <button class="btn" id="skip">I'm not sure, show me</button>
+            <span id="wmsg" class="hint"></span>
+          </div>
+          <div id="wfb"></div>
+        </div>`;
+      const ta = $("#sent", el);
+      ta.focus();
+      $("#say", el).addEventListener("click", () => speak(w.word.replace(/\.\.\./g, "")));
+      ta.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#mark", el).click(); }
+      });
+      $("#skip", el).addEventListener("click", () => finish({ score: 0, skipped: true, feedback: "Here is how it is used. You'll see this word again soon.",
+        corrected_sentence: "", model_sentence: filledSentence(w) }, ""));
+      $("#mark", el).addEventListener("click", async () => {
+        const sentence = ta.value.trim();
+        if (sentence.split(/\s+/).length < 3) { $("#wmsg", el).textContent = "Please write a full sentence."; return; }
+        $("#mark", el).disabled = true; $("#skip", el).disabled = true; ta.disabled = true;
+        $("#wmsg", el).textContent = "Marking...";
+        try {
+          finish(await window.ClozeTutor.grade(w, sentence, writePrefs.showMeaning), sentence);
+        } catch (err) {
+          $("#wmsg", el).textContent = err.message;
+          $("#mark", el).disabled = false; $("#skip", el).disabled = false; ta.disabled = false;
+        }
+      });
+
+      function finish(r, sentence) {
+        const ok = r.score >= 3;
+        record(w, ok, false);
+        if (!r.skipped) {
+          state.sentences.push({ date: Date.now(), id: w.id, word: w.word, sentence, score: r.score,
+            feedback: r.feedback, corrected: r.corrected_sentence });
+          if (state.sentences.length > 500) state.sentences.shift();
+        }
+        save();
+        results.push({ w, sentence, ...r });
+        // adapt: strong answer -> harder, weak -> easier and repeat the word later
+        if (r.score === 4) level = Math.min(3, level + 0.5);
+        else if (r.score <= 1) level = Math.max(1, level - 0.5);
+        else if (r.score === 2) level = Math.max(1, level - 0.25);
+        if (r.score <= 2 && !isRetry && i + 3 < total) retry.push({ w, dueAt: i + 3 });
+
+        const next = i + 1 < total ? pickNext(i + 1) : null;
+        const dir = !next ? "" : next.level > w.level ? " (a harder word)" : next.level < w.level ? " (an easier word)" : "";
+        ta.disabled = true;
+        $("#mark", el).remove(); $("#skip", el).remove(); $("#wmsg", el).textContent = "";
+        $("#wfb", el).innerHTML = `
+          <div class="feedback ${ok ? "right" : "wrong"}">
+            ${r.skipped ? "" : `<div class="verdict">${STARS(r.score)} ${SCORE_WORDS[r.score]} (${r.score}/4)</div>`}
+            <div>${esc(r.feedback)}</div>
+            ${!r.skipped && r.corrected_sentence && r.corrected_sentence !== sentence ? `<div style="margin-top:6px"><strong>Better:</strong> ${esc(r.corrected_sentence)}</div>` : ""}
+            <div style="margin-top:6px"><strong>Example:</strong> ${esc(r.model_sentence)}</div>
+          </div>
+          <div class="row" style="margin-top:12px"><button class="btn primary" id="wnext">${next ? `Next${dir} &rarr;` : "See results"}</button></div>`;
+        $("#wnext", el).addEventListener("click", () => step(i + 1, next));
+        $("#wnext", el).focus();
+      }
+    };
+    step(0, pickNext(0));
+  }
+
+  function writeSummary(el, results) {
+    const marked = results.filter((r) => !r.skipped);
+    const avg = marked.length ? marked.reduce((s, r) => s + r.score, 0) / marked.length : 0;
+    el.innerHTML = `
+      <h1>Use It: results</h1>
+      <div class="card stat">
+        <div class="num">${avg.toFixed(1)}<span style="font-size:1rem;color:var(--muted)">/4</span></div>
+        <div class="label">Average over ${marked.length} marked sentence${marked.length === 1 ? "" : "s"}${results.length > marked.length ? `, ${results.length - marked.length} skipped` : ""}.</div>
+      </div>
+      <div class="card">
+        ${results.map((r) => `<div style="margin:8px 0;padding-bottom:8px;border-bottom:1px solid var(--line)">
+          <strong>${esc(r.w.word)}</strong> ${r.skipped ? `<span class="badge weak">Skipped</span>` : `<span class="dots">${STARS(r.score)}</span>`}
+          ${r.sentence ? `<div>${esc(r.sentence)}</div>` : ""}
+          ${!r.skipped && r.corrected_sentence && r.corrected_sentence !== r.sentence ? `<div class="hint">Better: ${esc(r.corrected_sentence)}</div>` : ""}
+          <div class="hint">${esc(r.skipped ? "Example: " + r.model_sentence : r.feedback)}</div></div>`).join("")}
+      </div>
+      <div class="row"><button class="btn primary" id="wagain">Another round</button><a class="btn" href="#dashboard">See my level</a></div>`;
+    $("#wagain").addEventListener("click", () => renderWriteSetup(el));
+  }
+
   // ---------- settings ----------
   function renderSettings(el) {
     el.innerHTML = `
@@ -684,6 +869,19 @@
         It is <strong>not</strong> copied from any PSLE or school prelim paper. When you work through an actual paper,
         tag matching words with the source (e.g. "PSLE 2023" or "Nanyang Prelim 2024") or add new words with
         <em>Word List &rarr; Add a word from a paper</em>. You can then search the list by source.</div>
+      </div>
+      <div class="card">
+        <h2>Sentence marking (Use It quiz)</h2>
+        <p class="lead">The Use It quiz sends each sentence to Claude (${esc(window.ClozeTutor.MODEL)}) for marking. Paste your own Anthropic API key from console.anthropic.com.</p>
+        <div class="row">
+          <input type="password" id="apikey" placeholder="sk-ant-..." style="flex:1;min-width:220px" value="${esc(window.ClozeTutor.getKey())}" autocomplete="off">
+          <button class="btn primary" id="keysave">Save key</button>
+          <button class="btn" id="keyclear">Remove</button>
+        </div>
+        <p id="keymsg" class="hint"></p>
+        <div class="notice">The key is stored only in this browser and is never included in backups. Anyone using this browser can use it,
+        so keep the app on a family device, do not put the key in the GitHub repo, and set a monthly spend limit for the key in the Anthropic Console.
+        Each marked sentence costs roughly one US cent.</div>
       </div>
       <div class="card">
         <h2>Back up and restore</h2>
@@ -718,9 +916,19 @@
         $("#smsg").textContent = "Backup restored.";
       }).catch(() => { $("#smsg").textContent = "That file is not a valid backup."; });
     });
+    $("#keysave").addEventListener("click", () => {
+      const k = $("#apikey").value.trim();
+      window.ClozeTutor.setKey(k);
+      $("#keymsg").textContent = k ? "Key saved in this browser." : "Key removed.";
+    });
+    $("#keyclear").addEventListener("click", () => {
+      window.ClozeTutor.setKey("");
+      $("#apikey").value = "";
+      $("#keymsg").textContent = "Key removed.";
+    });
     $("#reset").addEventListener("click", () => {
       if (!confirm("Clear all progress and test history?")) return;
-      state.progress = {}; state.tests = []; state.quizzes = [];
+      state.progress = {}; state.tests = []; state.quizzes = []; state.sentences = [];
       save();
       $("#smsg").textContent = "Progress cleared.";
     });

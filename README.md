@@ -6,6 +6,7 @@ A small offline web app for practising **PSLE English Comprehension Cloze** voca
 - **Source tags**: tag any word with where you met it (e.g. `PSLE 2023`, `Nanyang Prelim 2024`), then search by that tag.
 - **Add a word from a paper**: add your own items (word, meaning, example with a `[[blank]]`, other accepted answers).
 - **Pop Quiz**: 5 to 20 questions, either typed open-ended answers (like the real paper) or multiple choice. Rounds can be a smart mix of due, weak and new words, or limited to a level or category. Hints are available, and each word is reviewed after you answer.
+- **Use It** (needs an Anthropic API key): the app shows a word, and the learner writes an original sentence with it. Claude marks the sentence out of 4, explains the problem, gives a corrected version of the learner's own sentence, and adds a fresh example. A 4 leads to a harder word, a 1 or 2 leads to an easier one, and a missed word comes back three questions later. Every sentence is logged so a parent can review them.
 - **Level Test**: 20 adaptive typed questions that get harder when you answer correctly and easier when you don't. It gives a 0 to 100 score and a level from Foundation to Exam-ready. Scores are kept so you can see progress over time.
 - **My Level dashboard**: latest test score and level, word-list mastery %, words due for review, mastery and accuracy per category, the weakest category to work on next, and a chart of test history.
 
@@ -22,6 +23,23 @@ No install and no server. Open `index.html` in any modern browser (desktop, tabl
 To use it on a phone or iPad, host the folder on GitHub Pages (repo Settings → Pages → deploy from this branch) and open the URL.
 
 Progress is kept in the browser's `localStorage`, so it belongs to one browser on one device. Use Export or Import in Settings to move it between devices.
+
+## Sentence marking setup
+
+1. Create an API key at console.anthropic.com and set a monthly spend limit on it. Each sentence costs about one US cent.
+2. In the app, open **Settings → Sentence marking**, paste the key and save.
+
+The key stays in this browser's storage only. It is never included in exported backups and must never be committed to the repo. The browser calls the Claude API directly through a bundled copy of the official SDK (`js/vendor/`). This is fine for a single family device but not for a public website.
+
+The marking prompt and rubric are in `js/tutor.js` (`SYSTEM_PROMPT`), so you can adjust them there.
+
+| Score | Meaning |
+|---|---|
+| 4 | Word used correctly in meaning and grammar, and the sentence makes the meaning clear |
+| 3 | Word used correctly, with a small slip elsewhere or a sentence too bare to show the meaning |
+| 2 | Roughly the right idea, but the word itself is misused (e.g. "despite of") |
+| 1 | Wrong meaning, or the sentence is too broken to tell |
+| 0 | Word missing, off task, or the example copied |
 
 ## How progress is scored
 
