@@ -33,8 +33,40 @@
     }
   }
   let state = load();
+  // home server connection, filled in at startup (see bottom of file)
+  let server = { online: false, marking: false, model: "" };
+  let pushTimer = null;
+  let syncFailed = false;
+
   function save() {
+    state.savedAt = Date.now();
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* storage full or blocked */ }
+    if (server.online) {
+      clearTimeout(pushTimer);
+      pushTimer = setTimeout(pushState, 400);
+    }
+  }
+  function pushState() {
+    window.ClozeTutor.saveState(state)
+      .then(() => { syncFailed = false; })
+      .catch(() => { syncFailed = true; });
+  }
+  function hasData(s) {
+    return !!s && (Object.keys(s.progress || {}).length > 0 || (s.tests || []).length > 0 || (s.custom || []).length > 0);
+  }
+  /* Take the server's copy if it is newer than ours. Returns true if state changed. */
+  async function pullState() {
+    try {
+      const remote = await window.ClozeTutor.loadState();
+      if (hasData(remote) && (remote.savedAt || 0) > (state.savedAt || 0)) {
+        state = Object.assign(blankState(), remote);
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+        buildWords();
+        return true;
+      }
+      if (hasData(state) && !hasData(remote)) pushState();   // first run: move this browser's progress to the server
+    } catch (e) { syncFailed = true; }
+    return false;
   }
 
   // ---------- words ----------
@@ -700,14 +732,16 @@
   }
 
   function renderWriteSetup(el) {
-    const hasKey = !!window.ClozeTutor.getKey();
+    const hasKey = server.marking;
     const catOpts = Object.entries(window.CATEGORIES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
     const log = state.sentences.slice(-30).reverse();
     el.innerHTML = `
       <h1>Use It</h1>
       <p class="lead">See a word, write your own sentence with it, and get it marked out of 4. A strong sentence brings a harder word next;
         a weak one brings an easier word, and the missed word comes back later in the round.</p>
-      ${hasKey ? "" : `<div class="notice" style="margin-bottom:14px">Marking needs an Anthropic API key. Add one in <a href="#settings">Settings</a> first.</div>`}
+      ${hasKey ? "" : `<div class="notice" style="margin-bottom:14px">${server.online
+        ? "The home server is running but has no API key yet. Add it to server/config.env and restart the server."
+        : "Sentence marking needs the home server. Open the app from the server's address (for example http://raspberrypi.local:8000) instead of as a file. See the README."}</div>`}
       <div class="card">
         <div class="row" style="gap:16px;align-items:flex-end">
           <label class="field">Words
@@ -871,17 +905,12 @@
         <em>Word List &rarr; Add a word from a paper</em>. You can then search the list by source.</div>
       </div>
       <div class="card">
-        <h2>Sentence marking (Use It quiz)</h2>
-        <p class="lead">The Use It quiz sends each sentence to Claude (${esc(window.ClozeTutor.MODEL)}) for marking. Paste your own Anthropic API key from console.anthropic.com.</p>
-        <div class="row">
-          <input type="password" id="apikey" placeholder="sk-ant-..." style="flex:1;min-width:220px" value="${esc(window.ClozeTutor.getKey())}" autocomplete="off">
-          <button class="btn primary" id="keysave">Save key</button>
-          <button class="btn" id="keyclear">Remove</button>
-        </div>
-        <p id="keymsg" class="hint"></p>
-        <div class="notice">The key is stored only in this browser and is never included in backups. Anyone using this browser can use it,
-        so keep the app on a family device, do not put the key in the GitHub repo, and set a monthly spend limit for the key in the Anthropic Console.
-        Each marked sentence costs roughly one US cent.</div>
+        <h2>Home server</h2>
+        ${server.online
+          ? `<p>Connected. Progress is saved on the home server, so every device on the home network sees the same progress.${syncFailed ? ` <strong style="color:var(--bad)">The last save did not reach the server.</strong>` : ""}</p>
+             <p>Sentence marking: ${server.marking ? `on, using ${esc(server.model)}.` : "off. Add ANTHROPIC_API_KEY to server/config.env and restart the server."}</p>`
+          : `<p>Not connected. Progress is saved in this browser only, and the Use It quiz is unavailable.
+             To share progress between devices and mark sentences, run the home server and open the app from its address. See the README.</p>`}
       </div>
       <div class="card">
         <h2>Back up and restore</h2>
@@ -916,16 +945,6 @@
         $("#smsg").textContent = "Backup restored.";
       }).catch(() => { $("#smsg").textContent = "That file is not a valid backup."; });
     });
-    $("#keysave").addEventListener("click", () => {
-      const k = $("#apikey").value.trim();
-      window.ClozeTutor.setKey(k);
-      $("#keymsg").textContent = k ? "Key saved in this browser." : "Key removed.";
-    });
-    $("#keyclear").addEventListener("click", () => {
-      window.ClozeTutor.setKey("");
-      $("#apikey").value = "";
-      $("#keymsg").textContent = "Key removed.";
-    });
     $("#reset").addEventListener("click", () => {
       if (!confirm("Clear all progress and test history?")) return;
       state.progress = {}; state.tests = []; state.quizzes = []; state.sentences = [];
@@ -934,5 +953,19 @@
     });
   }
 
-  route();
+  async function init() {
+    server = await window.ClozeTutor.status();
+    if (server.online) {
+      await pullState();
+      $(".foot").textContent = "Progress is saved on the home server.";
+      // pick up progress made on another device when this one comes back into view
+      document.addEventListener("visibilitychange", async () => {
+        if (document.visibilityState !== "visible") return;
+        const tab = (location.hash || "#dashboard").slice(1);
+        if ((await pullState()) && ["dashboard", "words", "settings"].includes(tab)) route();
+      });
+    }
+    route();
+  }
+  init();
 })();
